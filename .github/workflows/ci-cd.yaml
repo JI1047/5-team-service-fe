@@ -203,14 +203,14 @@ jobs:
           REGISTRY="${{ secrets.ECR_REPOSITORY }}"
           if [ "${{ github.ref }}" == "refs/heads/develop" ]; then
             TAG="develop"
-            echo "tags=${REGISTRY}/doktori/frontend:develop" >> $GITHUB_OUTPUT
+            echo "tags=${REGISTRY}/fe-test:develop" >> $GITHUB_OUTPUT
           else
             SHORT_SHA="${GITHUB_SHA:0:7}"
             TAG="sha-${SHORT_SHA}"
             {
               echo "tags<<EOF"
-              echo "${REGISTRY}/doktori/frontend:sha-${SHORT_SHA}"
-              echo "${REGISTRY}/doktori/frontend:latest"
+              echo "${REGISTRY}/fe-test:sha-${SHORT_SHA}"
+              echo "${REGISTRY}/fe-test:latest"
               echo "EOF"
             } >> $GITHUB_OUTPUT
           fi
@@ -263,10 +263,10 @@ jobs:
           COMMANDS=$(jq -n --arg registry "${{ secrets.ECR_REPOSITORY }}" '[
             "set -e",
             ("aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin " + $registry),
-            ("docker pull " + $registry + "/doktori/frontend:develop"),
+            ("docker pull " + $registry + "/fe-test:develop"),
             "docker stop frontend 2>/dev/null || true",
             "docker rm frontend 2>/dev/null || true",
-            ("docker run -d --name frontend --restart unless-stopped -p 3000:3000 " + $registry + "/doktori/frontend:develop"),
+            ("docker run -d --name frontend --restart unless-stopped -p 3000:3000 " + $registry + "/fe-test:develop"),
             "docker image prune -f"
           ]')
 
@@ -357,10 +357,10 @@ jobs:
           COMMANDS=$(jq -n --arg registry "$REGISTRY" --arg tag "$TAG" '[
             "set -e",
             ("aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin " + $registry),
-            ("docker pull " + $registry + "/doktori/frontend:" + $tag),
+            ("docker pull " + $registry + "/fe-test:" + $tag),
             "docker stop frontend 2>/dev/null || true",
             "docker rm frontend 2>/dev/null || true",
-            ("docker run -d --name frontend --restart unless-stopped -p 3000:3000 " + $registry + "/doktori/frontend:" + $tag),
+            ("docker run -d --name frontend --restart unless-stopped -p 3000:3000 " + $registry + "/fe-test:" + $tag),
             "docker image prune -f"
           ]')
 
