@@ -5,6 +5,7 @@ on:
     branches:
       - develop
       - main
+      - feature/cicd
   pull_request:
     branches:
       - develop
@@ -102,8 +103,78 @@ jobs:
                }" \
                ${{ secrets.DISCORD_WEBHOOK_URL }} || true
 
-  build-and-push:
+  deploy-static:
     needs: ci
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Build Next.js app for static assets
+        run: pnpm run build
+        env:
+          NODE_ENV: production
+          NEXT_PUBLIC_API_BASE_URL: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_API_BASE_URL_PROD || secrets.NEXT_PUBLIC_API_BASE_URL_DEV }}
+          NEXT_PUBLIC_FIREBASE_API_KEY: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_API_KEY_PROD || secrets.NEXT_PUBLIC_FIREBASE_API_KEY_DEV }}
+          NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN_PROD || secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN_DEV }}
+          NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID_PROD || secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID_DEV }}
+          NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET_PROD || secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET_DEV }}
+          NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID_PROD || secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID_DEV }}
+          NEXT_PUBLIC_GA_ID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_GA_ID_PROD || secrets.NEXT_PUBLIC_GA_ID_DEV }}
+          NEXT_PUBLIC_FIREBASE_APPID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_APPID_PROD || secrets.NEXT_PUBLIC_FIREBASE_APPID_DEV }}
+          NEXT_PUBLIC_FIREBASE_VAPID_KEY: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_VAPID_KEY_PROD || secrets.NEXT_PUBLIC_FIREBASE_VAPID_KEY_DEV }}
+          NEXT_PUBLIC_SENTRY_DSN: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_SENTRY_DSN_PROD || secrets.NEXT_PUBLIC_SENTRY_DSN_DEV || '' }}
+          NEXT_PUBLIC_SENTRY_ENV: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      - name: Upload static assets to S3
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            BUCKET="${{ secrets.S3_STATIC_BUCKET_PROD }}"
+          else
+            BUCKET="${{ secrets.S3_STATIC_BUCKET_DEV }}"
+          fi
+
+          if [ -z "$BUCKET" ]; then
+            echo "::error::S3 static bucket secret is not set"
+            exit 1
+          fi
+
+          aws s3 sync .next/static "s3://${BUCKET}/_next/static" \
+            --delete \
+            --cache-control "public,max-age=31536000,immutable"
+
+          if [ -d public ]; then
+            aws s3 sync public "s3://${BUCKET}/public" \
+              --delete \
+              --cache-control "public,max-age=3600"
+          fi
+
+  build-and-push:
+    needs: deploy-static
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -127,7 +198,7 @@ jobs:
       - name: Set image metadata
         id: meta
         run: |
-          REGISTRY="${{ secrets.ECR_REGISTRY }}"
+          REGISTRY="${{ secrets.ECR_REPOSITORY }}"
           if [ "${{ github.ref }}" == "refs/heads/develop" ]; then
             TAG="develop"
             echo "tags=${REGISTRY}/doktori/frontend:develop" >> $GITHUB_OUTPUT
@@ -169,7 +240,7 @@ jobs:
 
   deploy-dev:
     needs: build-and-push
-    if: github.ref == 'refs/heads/develop'
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/feature/cicd'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -183,7 +254,7 @@ jobs:
 
       - name: Deploy to Dev via SSM
         run: |
-          COMMANDS=$(jq -n --arg registry "${{ secrets.ECR_REGISTRY }}" '[
+          COMMANDS=$(jq -n --arg registry "${{ secrets.ECR_REPOSITORY }}" '[
             "set -e",
             ("aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin " + $registry),
             ("docker pull " + $registry + "/doktori/frontend:develop"),
@@ -260,7 +331,7 @@ jobs:
 
   deploy-prod:
     needs: build-and-push
-    if: github.ref == 'refs/heads/main'
+    if: false # temporarily disabled
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -274,7 +345,7 @@ jobs:
 
       - name: Deploy to Prod via SSM
         run: |
-          REGISTRY="${{ secrets.ECR_REGISTRY }}"
+          REGISTRY="${{ secrets.ECR_REPOSITORY }}"
           TAG="${{ needs.build-and-push.outputs.image-tag }}"
 
           COMMANDS=$(jq -n --arg registry "$REGISTRY" --arg tag "$TAG" '[
@@ -351,3 +422,53 @@ jobs:
                  }]
                }" \
                ${{ secrets.DISCORD_WEBHOOK_URL }} || true
+
+  invalidate-dev:
+    needs: deploy-dev
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/feature/cicd'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      - name: Invalidate CloudFront cache
+        run: |
+          DIST_ID="${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_DEV }}"
+          if [ -z "$DIST_ID" ]; then
+            echo "::error::CLOUDFRONT_DISTRIBUTION_ID_DEV secret is not set"
+            exit 1
+          fi
+          aws cloudfront create-invalidation \
+            --distribution-id "$DIST_ID" \
+            --paths "/*"
+
+  invalidate-prod:
+    needs: deploy-prod
+    if: false # temporarily disabled
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      - name: Invalidate CloudFront cache
+        run: |
+          DIST_ID="${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_PROD }}"
+          if [ -z "$DIST_ID" ]; then
+            echo "::error::CLOUDFRONT_DISTRIBUTION_ID_PROD secret is not set"
+            exit 1
+          fi
+          aws cloudfront create-invalidation \
+            --distribution-id "$DIST_ID" \
+            --paths "/*"
