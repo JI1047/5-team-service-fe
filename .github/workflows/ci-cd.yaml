@@ -6,10 +6,6 @@ on:
       - develop
       - main
       - feature/cicd
-  pull_request:
-    branches:
-      - develop
-      - main
 
 concurrency:
   group: frontend-${{ github.ref }}
