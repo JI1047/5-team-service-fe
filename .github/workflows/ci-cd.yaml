@@ -260,13 +260,15 @@ jobs:
 
       - name: Deploy to Dev via SSM
         run: |
-          COMMANDS=$(jq -n --arg registry "${{ secrets.ECR_REPOSITORY }}" '[
+          TAG="${{ needs.build-and-push.outputs.image-tag }}"
+
+          COMMANDS=$(jq -n --arg registry "${{ secrets.ECR_REPOSITORY }}" --arg tag "$TAG" '[
             "set -e",
             ("aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin " + $registry),
-            ("docker pull " + $registry + "/fe-test:develop"),
+            ("docker pull " + $registry + "/fe-test:" + $tag),
             "docker stop frontend 2>/dev/null || true",
             "docker rm frontend 2>/dev/null || true",
-            ("docker run -d --name frontend --restart unless-stopped -p 3000:3000 " + $registry + "/fe-test:develop"),
+            ("docker run -d --name frontend --restart unless-stopped -p 3000:3000 " + $registry + "/fe-test:" + $tag),
             "docker image prune -f"
           ]')
 
