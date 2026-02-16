@@ -52,15 +52,15 @@ jobs:
           NEXT_PUBLIC_SENTRY_DSN: ${{ secrets.NEXT_PUBLIC_SENTRY_DSN_DEV || '' }}
           NEXT_PUBLIC_SENTRY_ENV: development
 
+      - name: Package build artifact
+        run: |
+          tar -czf fe-build-${{ github.sha }}.tar.gz .next public Dockerfile
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: fe-build-${{ github.sha }}
-          include-hidden-files: true
-          path: |
-            .next
-            public
-            Dockerfile
+          path: fe-build-${{ github.sha }}.tar.gz
           retention-days: 3
 
   deploy-static-from-artifact:
@@ -76,6 +76,10 @@ jobs:
         with:
           name: fe-build-${{ github.sha }}
           path: ./build-artifact
+
+      - name: Extract build artifact
+        run: |
+          tar -xzf build-artifact/fe-build-${{ github.sha }}.tar.gz -C build-artifact
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -115,6 +119,10 @@ jobs:
         with:
           name: fe-build-${{ github.sha }}
           path: ./build-artifact
+
+      - name: Extract build artifact
+        run: |
+          tar -xzf build-artifact/fe-build-${{ github.sha }}.tar.gz -C build-artifact
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
