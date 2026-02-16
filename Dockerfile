@@ -55,3 +55,16 @@ COPY --from=builder /app/public ./public
 USER nonroot
 EXPOSE 3000
 CMD ["server.js"]
+
+FROM gcr.io/distroless/nodejs20-debian12 AS prebuilt-runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+COPY .next/standalone ./
+COPY .next/static ./.next/static
+COPY public ./public
+
+USER nonroot
+EXPOSE 3000
+CMD ["server.js"]

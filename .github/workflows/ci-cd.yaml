@@ -3,8 +3,6 @@ name: Frontend CI/CD
 on:
   push:
     branches:
-      - develop
-      - main
       - feature/cicd
 
 concurrency:
@@ -12,22 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check-source-branch:
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate source branch
-        run: |
-          if [ "${{ github.head_ref }}" != "develop" ] && [[ "${{ github.head_ref }}" != hotfix/* ]]; then
-            echo "❌ Error: Only 'develop' or 'hotfix/*' branches can be merged into 'main'"
-            echo "Source branch: ${{ github.head_ref }}"
-            exit 1
-          fi
-          echo "✅ Source branch validation passed: ${{ github.head_ref }}"
-
-  ci:
-    needs: [check-source-branch]
-    if: always() && (needs.check-source-branch.result == 'success' || needs.check-source-branch.result == 'skipped')
+  ci-build-once:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -53,95 +36,45 @@ jobs:
       - name: Check Prettier formatting
         run: pnpm run format:check
 
-      - name: Build Next.js app (includes type check)
+      - name: Build Next.js app (single build source)
         run: pnpm run build
         env:
           NODE_ENV: production
-          NEXT_PUBLIC_API_BASE_URL: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_API_BASE_URL_PROD || secrets.NEXT_PUBLIC_API_BASE_URL_DEV }}
-          NEXT_PUBLIC_FIREBASE_API_KEY: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_API_KEY_PROD || secrets.NEXT_PUBLIC_FIREBASE_API_KEY_DEV }}
-          NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN_PROD || secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN_DEV }}
-          NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID_PROD || secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID_DEV }}
-          NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET_PROD || secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET_DEV }}
-          NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID_PROD || secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID_DEV }}
-          NEXT_PUBLIC_GA_ID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_GA_ID_PROD || secrets.NEXT_PUBLIC_GA_ID_DEV }}
-          NEXT_PUBLIC_FIREBASE_APPID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_APPID_PROD || secrets.NEXT_PUBLIC_FIREBASE_APPID_DEV }}
-          NEXT_PUBLIC_FIREBASE_VAPID_KEY: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_VAPID_KEY_PROD || secrets.NEXT_PUBLIC_FIREBASE_VAPID_KEY_DEV }}
-          NEXT_PUBLIC_SENTRY_DSN: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_SENTRY_DSN_PROD || secrets.NEXT_PUBLIC_SENTRY_DSN_DEV }}
-          NEXT_PUBLIC_SENTRY_ENV: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+          NEXT_PUBLIC_API_BASE_URL: ${{ secrets.NEXT_PUBLIC_API_BASE_URL_DEV }}
+          NEXT_PUBLIC_FIREBASE_API_KEY: ${{ secrets.NEXT_PUBLIC_FIREBASE_API_KEY_DEV }}
+          NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN_DEV }}
+          NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID_DEV }}
+          NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${{ secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET_DEV }}
+          NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID_DEV }}
+          NEXT_PUBLIC_GA_ID: ${{ secrets.NEXT_PUBLIC_GA_ID_DEV }}
+          NEXT_PUBLIC_FIREBASE_APPID: ${{ secrets.NEXT_PUBLIC_FIREBASE_APPID_DEV }}
+          NEXT_PUBLIC_FIREBASE_VAPID_KEY: ${{ secrets.NEXT_PUBLIC_FIREBASE_VAPID_KEY_DEV }}
+          NEXT_PUBLIC_SENTRY_DSN: ${{ secrets.NEXT_PUBLIC_SENTRY_DSN_DEV || '' }}
+          NEXT_PUBLIC_SENTRY_ENV: development
 
-      - name: Notify Discord on failure
-        if: failure()
-        run: |
-          COMMIT_SHA="${{ github.sha }}"
-          SHORT_SHA="${COMMIT_SHA:0:7}"
-          COMMIT_MSG=$(echo '${{ github.event.head_commit.message }}' | head -1)
-          COMMIT_AUTHOR="${{ github.event.head_commit.author.name }}"
-          COMMIT_URL="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
-          ACTIONS_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fe-build-${{ github.sha }}
+          path: |
+            .next
+            public
+            Dockerfile
+          retention-days: 3
 
-          curl -H "Content-Type: application/json" \
-               -X POST \
-               -d "{
-                 \"content\": \"❌ **Frontend CI 빌드 실패**\",
-                 \"embeds\": [{
-                   \"title\": \"🔴 빌드 실패 알림\",
-                   \"color\": 15158528,
-                   \"fields\": [
-                     {\"name\": \"📦 저장소\", \"value\": \"\`${{ github.repository }}\`\", \"inline\": true},
-                     {\"name\": \"🌿 브랜치\", \"value\": \"\`${{ github.ref_name }}\`\", \"inline\": true},
-                     {\"name\": \"🔖 커밋\", \"value\": \"[\`$SHORT_SHA\`]($COMMIT_URL)\", \"inline\": true},
-                     {\"name\": \"💬 커밋 메시지\", \"value\": \"$COMMIT_MSG\", \"inline\": false},
-                     {\"name\": \"👤 작성자\", \"value\": \"$COMMIT_AUTHOR\", \"inline\": true},
-                     {\"name\": \"📋 상세 로그\", \"value\": \"[Actions에서 확인]($ACTIONS_URL)\", \"inline\": true}
-                   ],
-                   \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
-                 }]
-               }" \
-               ${{ secrets.DISCORD_WEBHOOK_URL }} || true
-
-  deploy-static:
-    needs: ci
-    if: |
-      always() &&
-      needs.ci.result == 'success' &&
-      github.event_name == 'push'
+  deploy-static-from-artifact:
+    needs: ci-build-once
+    if: ${{ needs.ci-build-once.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
         with:
-          version: 9
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --prefer-offline
-
-      - name: Build Next.js app for static assets
-        run: pnpm run build
-        env:
-          NODE_ENV: production
-          NEXT_PUBLIC_API_BASE_URL: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_API_BASE_URL_PROD || secrets.NEXT_PUBLIC_API_BASE_URL_DEV }}
-          NEXT_PUBLIC_FIREBASE_API_KEY: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_API_KEY_PROD || secrets.NEXT_PUBLIC_FIREBASE_API_KEY_DEV }}
-          NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN_PROD || secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN_DEV }}
-          NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID_PROD || secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID_DEV }}
-          NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET_PROD || secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET_DEV }}
-          NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID_PROD || secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID_DEV }}
-          NEXT_PUBLIC_GA_ID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_GA_ID_PROD || secrets.NEXT_PUBLIC_GA_ID_DEV }}
-          NEXT_PUBLIC_FIREBASE_APPID: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_APPID_PROD || secrets.NEXT_PUBLIC_FIREBASE_APPID_DEV }}
-          NEXT_PUBLIC_FIREBASE_VAPID_KEY: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_VAPID_KEY_PROD || secrets.NEXT_PUBLIC_FIREBASE_VAPID_KEY_DEV }}
-          NEXT_PUBLIC_SENTRY_DSN: ${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_SENTRY_DSN_PROD || secrets.NEXT_PUBLIC_SENTRY_DSN_DEV || '' }}
-          NEXT_PUBLIC_SENTRY_ENV: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+          name: fe-build-${{ github.sha }}
+          path: ./build-artifact
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -149,35 +82,26 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ap-northeast-2
 
-      - name: Upload static assets to S3
+      - name: Upload static assets to S3 (stabilization mode)
         run: |
-          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
-            BUCKET="${{ secrets.S3_STATIC_BUCKET_PROD }}"
-          else
-            BUCKET="${{ secrets.S3_STATIC_BUCKET_DEV }}"
-          fi
-
+          BUCKET="${{ secrets.S3_STATIC_BUCKET_DEV }}"
           if [ -z "$BUCKET" ]; then
-            echo "::error::S3 static bucket secret is not set"
+            echo "::error::S3_STATIC_BUCKET_DEV secret is not set"
             exit 1
           fi
 
-          aws s3 sync .next/static "s3://${BUCKET}/_next/static" \
-            --delete \
+          # 1st stabilization phase: keep old hashes by not deleting objects.
+          aws s3 sync build-artifact/.next/static "s3://${BUCKET}/_next/static" \
             --cache-control "public,max-age=31536000,immutable"
 
-          if [ -d public ]; then
-            aws s3 sync public "s3://${BUCKET}/public" \
-              --delete \
+          if [ -d build-artifact/public ]; then
+            aws s3 sync build-artifact/public "s3://${BUCKET}/public" \
               --cache-control "public,max-age=3600"
           fi
 
-  build-and-push:
-    needs: deploy-static
-    if: |
-      always() &&
-      needs.deploy-static.result == 'success' &&
-      github.event_name == 'push'
+  build-and-push-image-from-same-artifact:
+    needs: deploy-static-from-artifact
+    if: ${{ needs.deploy-static-from-artifact.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -185,8 +109,11 @@ jobs:
     outputs:
       image-tag: ${{ steps.meta.outputs.image-tag }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fe-build-${{ github.sha }}
+          path: ./build-artifact
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -201,52 +128,42 @@ jobs:
         id: meta
         run: |
           REGISTRY="${{ secrets.ECR_REPOSITORY }}"
-          if [ "${{ github.ref }}" == "refs/heads/develop" ]; then
-            TAG="develop"
-            echo "tags=${REGISTRY}/fe-test:develop" >> $GITHUB_OUTPUT
-          else
-            SHORT_SHA="${GITHUB_SHA:0:7}"
-            TAG="sha-${SHORT_SHA}"
-            {
-              echo "tags<<EOF"
-              echo "${REGISTRY}/fe-test:sha-${SHORT_SHA}"
-              echo "${REGISTRY}/fe-test:latest"
-              echo "EOF"
-            } >> $GITHUB_OUTPUT
-          fi
-          echo "image-tag=${TAG}" >> $GITHUB_OUTPUT
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          TAG="sha-${SHORT_SHA}"
+
+          {
+            echo "tags<<EOF"
+            echo "${REGISTRY}/fe-test:${TAG}"
+            echo "${REGISTRY}/fe-test:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "image-tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Docker context from single build artifact
+        run: |
+          mkdir -p image-context
+          cp build-artifact/Dockerfile image-context/Dockerfile
+          cp -R build-artifact/.next image-context/.next
+          cp -R build-artifact/public image-context/public
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Frontend image
+      - name: Build and push Frontend image (prebuilt target)
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./image-context
+          file: ./image-context/Dockerfile
+          target: prebuilt-runner
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            NEXT_PUBLIC_API_BASE_URL=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_API_BASE_URL_PROD || secrets.NEXT_PUBLIC_API_BASE_URL_DEV }}
-            NEXT_PUBLIC_FIREBASE_API_KEY=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_API_KEY_PROD || secrets.NEXT_PUBLIC_FIREBASE_API_KEY_DEV }}
-            NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN_PROD || secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN_DEV }}
-            NEXT_PUBLIC_FIREBASE_PROJECT_ID=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID_PROD || secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID_DEV }}
-            NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET_PROD || secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET_DEV }}
-            NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID_PROD || secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID_DEV }}
-            NEXT_PUBLIC_GA_ID=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_GA_ID_PROD || secrets.NEXT_PUBLIC_GA_ID_DEV }}
-            NEXT_PUBLIC_FIREBASE_APPID=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_APPID_PROD || secrets.NEXT_PUBLIC_FIREBASE_APPID_DEV }}
-            NEXT_PUBLIC_FIREBASE_VAPID_KEY=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_FIREBASE_VAPID_KEY_PROD || secrets.NEXT_PUBLIC_FIREBASE_VAPID_KEY_DEV }}
-            NEXT_PUBLIC_SENTRY_DSN=${{ github.ref == 'refs/heads/main' && secrets.NEXT_PUBLIC_SENTRY_DSN_PROD || secrets.NEXT_PUBLIC_SENTRY_DSN_DEV || '' }}
-            NEXT_PUBLIC_SENTRY_ENV=${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
-  deploy-dev:
-    needs: build-and-push
-    if: |
-      always() &&
-      needs.build-and-push.result == 'success' &&
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/feature/cicd')
+  deploy-dev-via-ssm:
+    needs: build-and-push-image-from-same-artifact
+    if: ${{ needs.build-and-push-image-from-same-artifact.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -258,9 +175,27 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ap-northeast-2
 
+      - name: Precheck SSM target availability
+        run: |
+          ONLINE_COUNT=$(aws ssm describe-instance-information \
+            --filters \
+              "Key=tag:Role,Values=fe" \
+              "Key=tag:Name,Values=doktori-fe" \
+              "Key=tag:Stack,Values=compute" \
+              "Key=tag:Project,Values=doktori" \
+            --query "length(InstanceInformationList[?PingStatus=='Online'])" \
+            --output text)
+
+          if [ -z "$ONLINE_COUNT" ] || [ "$ONLINE_COUNT" = "0" ] || [ "$ONLINE_COUNT" = "None" ]; then
+            echo "::error::No online SSM target instance matched required tags"
+            exit 1
+          fi
+
+          echo "Matched online SSM targets: $ONLINE_COUNT"
+
       - name: Deploy to Dev via SSM
         run: |
-          TAG="${{ needs.build-and-push.outputs.image-tag }}"
+          TAG="${{ needs.build-and-push-image-from-same-artifact.outputs.image-tag }}"
 
           COMMANDS=$(jq -n --arg registry "${{ secrets.ECR_REPOSITORY }}" --arg tag "$TAG" '[
             "set -e",
@@ -298,6 +233,7 @@ jobs:
                 exit 1 ;;
             esac
           done
+
           echo "::error::SSM command timed out"
           exit 1
 
@@ -311,7 +247,7 @@ jobs:
           COMMIT_URL="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
           ACTIONS_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          if [ "${{ job.status }}" == "success" ]; then
+          if [ "${{ job.status }}" = "success" ]; then
             COLOR=3066993; STATUS_EMOJI="✅"; STATUS_TEXT="배포 성공"
           else
             COLOR=15158528; STATUS_EMOJI="❌"; STATUS_TEXT="배포 실패"
@@ -335,109 +271,11 @@ jobs:
                    \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
                  }]
                }" \
-               ${{ secrets.DISCORD_WEBHOOK_URL }} || true
+               "${{ secrets.DISCORD_WEBHOOK_URL }}" || true
 
-  deploy-prod:
-    needs: build-and-push
-    if: false # temporarily disabled
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ap-northeast-2
-
-      - name: Deploy to Prod via SSM
-        run: |
-          REGISTRY="${{ secrets.ECR_REPOSITORY }}"
-          TAG="${{ needs.build-and-push.outputs.image-tag }}"
-
-          COMMANDS=$(jq -n --arg registry "$REGISTRY" --arg tag "$TAG" '[
-            "set -e",
-            ("aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin " + $registry),
-            ("docker pull " + $registry + "/fe-test:" + $tag),
-            "docker stop frontend 2>/dev/null || true",
-            "docker rm frontend 2>/dev/null || true",
-            ("docker run -d --name frontend --restart unless-stopped -p 3000:3000 " + $registry + "/fe-test:" + $tag),
-            "docker image prune -f"
-          ]')
-
-          CMD_ID=$(aws ssm send-command \
-            --document-name "AWS-RunShellScript" \
-            --targets "Key=tag:Environment,Values=prod" "Key=tag:Service,Values=frontend" \
-            --parameters "{\"commands\": $COMMANDS}" \
-            --timeout-seconds 300 \
-            --comment "deploy prod frontend ${{ github.sha }}" \
-            --query "Command.CommandId" \
-            --output text)
-
-          echo "SSM Command: $CMD_ID"
-
-          for i in $(seq 1 60); do
-            sleep 5
-            STATUS=$(aws ssm list-command-invocations \
-              --command-id "$CMD_ID" \
-              --query "CommandInvocations[0].Status" \
-              --output text 2>/dev/null || echo "Pending")
-            echo "[$i/60] $STATUS"
-            case "$STATUS" in
-              Success) exit 0 ;;
-              Failed|Cancelled|TimedOut|DeliveryTimedOut)
-                aws ssm list-command-invocations --command-id "$CMD_ID" --details \
-                  --query "CommandInvocations[0].CommandPlugins[0].Output" --output text || true
-                exit 1 ;;
-            esac
-          done
-          echo "::error::SSM command timed out"
-          exit 1
-
-      - name: Notify Discord
-        if: always()
-        run: |
-          COMMIT_SHA="${{ github.sha }}"
-          SHORT_SHA="${COMMIT_SHA:0:7}"
-          COMMIT_MSG=$(echo '${{ github.event.head_commit.message }}' | head -1)
-          COMMIT_AUTHOR="${{ github.event.head_commit.author.name }}"
-          COMMIT_URL="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
-          ACTIONS_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-          if [ "${{ job.status }}" == "success" ]; then
-            COLOR=3066993; STATUS_EMOJI="✅"; STATUS_TEXT="배포 성공"
-          else
-            COLOR=15158528; STATUS_EMOJI="❌"; STATUS_TEXT="배포 실패"
-          fi
-
-          curl -H "Content-Type: application/json" \
-               -X POST \
-               -d "{
-                 \"content\": \"$STATUS_EMOJI **Frontend Production 배포 알림**\",
-                 \"embeds\": [{
-                   \"title\": \"🚀 [Production] $STATUS_TEXT\",
-                   \"color\": $COLOR,
-                   \"fields\": [
-                     {\"name\": \"📦 저장소\", \"value\": \"\`${{ github.repository }}\`\", \"inline\": true},
-                     {\"name\": \"🌿 브랜치\", \"value\": \"\`${{ github.ref_name }}\`\", \"inline\": true},
-                     {\"name\": \"🔖 커밋\", \"value\": \"[\`$SHORT_SHA\`]($COMMIT_URL)\", \"inline\": true},
-                     {\"name\": \"💬 커밋 메시지\", \"value\": \"$COMMIT_MSG\", \"inline\": false},
-                     {\"name\": \"👤 작성자\", \"value\": \"$COMMIT_AUTHOR\", \"inline\": true},
-                     {\"name\": \"📋 상세 로그\", \"value\": \"[Actions에서 확인]($ACTIONS_URL)\", \"inline\": true}
-                   ],
-                   \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
-                 }]
-               }" \
-               ${{ secrets.DISCORD_WEBHOOK_URL }} || true
-
-  invalidate-dev:
-    needs: deploy-dev
-    if: |
-      always() &&
-      needs.deploy-dev.result == 'success' &&
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/feature/cicd')
+  invalidate-cloudfront:
+    needs: deploy-dev-via-ssm
+    if: ${{ needs.deploy-dev-via-ssm.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -456,31 +294,7 @@ jobs:
             echo "::error::CLOUDFRONT_DISTRIBUTION_ID_DEV secret is not set"
             exit 1
           fi
-          aws cloudfront create-invalidation \
-            --distribution-id "$DIST_ID" \
-            --paths "/*"
 
-  invalidate-prod:
-    needs: deploy-prod
-    if: false # temporarily disabled
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ap-northeast-2
-
-      - name: Invalidate CloudFront cache
-        run: |
-          DIST_ID="${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_PROD }}"
-          if [ -z "$DIST_ID" ]; then
-            echo "::error::CLOUDFRONT_DISTRIBUTION_ID_PROD secret is not set"
-            exit 1
-          fi
           aws cloudfront create-invalidation \
             --distribution-id "$DIST_ID" \
             --paths "/*"
