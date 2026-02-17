@@ -356,4 +356,4 @@ jobs:
 
           aws cloudfront create-invalidation \
             --distribution-id "$DIST_ID" \
-            --paths "/*"
+            --paths "/_next/static/*" "/public/*"
