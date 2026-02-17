@@ -12,9 +12,30 @@ concurrency:
 jobs:
   ci-build-once:
     runs-on: ubuntu-latest
+    outputs:
+      release_sha: ${{ steps.release_vars.outputs.release_sha }}
+      image_tag: ${{ steps.release_vars.outputs.image_tag }}
+      s3_asset_version: ${{ steps.release_vars.outputs.s3_asset_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Derive release variables
+        id: release_vars
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          RELEASE_SHA="sha-${SHORT_SHA}"
+          IMAGE_TAG="$RELEASE_SHA"
+          S3_ASSET_VERSION="$RELEASE_SHA"
+
+          if [ "$IMAGE_TAG" != "$S3_ASSET_VERSION" ] || [ "$IMAGE_TAG" != "$RELEASE_SHA" ]; then
+            echo "::error::Release variable mismatch: RELEASE_SHA=$RELEASE_SHA IMAGE_TAG=$IMAGE_TAG S3_ASSET_VERSION=$S3_ASSET_VERSION"
+            exit 1
+          fi
+
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "s3_asset_version=$S3_ASSET_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -89,6 +110,15 @@ jobs:
 
       - name: Upload static assets to S3 (stabilization mode)
         run: |
+          RELEASE_SHA="${{ needs.ci-build-once.outputs.release_sha }}"
+          IMAGE_TAG="${{ needs.ci-build-once.outputs.image_tag }}"
+          S3_ASSET_VERSION="${{ needs.ci-build-once.outputs.s3_asset_version }}"
+
+          if [ "$IMAGE_TAG" != "$S3_ASSET_VERSION" ] || [ "$IMAGE_TAG" != "$RELEASE_SHA" ]; then
+            echo "::error::Release variable mismatch: RELEASE_SHA=$RELEASE_SHA IMAGE_TAG=$IMAGE_TAG S3_ASSET_VERSION=$S3_ASSET_VERSION"
+            exit 1
+          fi
+
           BUCKET="${{ secrets.S3_STATIC_BUCKET_DEV }}"
           if [ -z "$BUCKET" ]; then
             echo "::error::S3_STATIC_BUCKET_DEV secret is not set"
@@ -104,15 +134,21 @@ jobs:
               --cache-control "public,max-age=3600"
           fi
 
+          printf '{"release_sha":"%s","image_tag":"%s","s3_asset_version":"%s","commit_sha":"%s"}\n' \
+            "$RELEASE_SHA" "$IMAGE_TAG" "$S3_ASSET_VERSION" "$GITHUB_SHA" > release-manifest.json
+
+          aws s3 cp release-manifest.json "s3://${BUCKET}/_releases/${S3_ASSET_VERSION}.json" \
+            --cache-control "no-store"
+
   build-and-push-image-from-same-artifact:
-    needs: deploy-static-from-artifact
-    if: ${{ needs.deploy-static-from-artifact.result == 'success' }}
+    needs: [ci-build-once, deploy-static-from-artifact]
+    if: ${{ needs.ci-build-once.result == 'success' && needs.deploy-static-from-artifact.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
     outputs:
-      image-tag: ${{ steps.meta.outputs.image-tag }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
@@ -137,17 +173,23 @@ jobs:
         id: meta
         run: |
           REGISTRY="${{ secrets.ECR_REPOSITORY }}"
-          SHORT_SHA="${GITHUB_SHA:0:7}"
-          TAG="sha-${SHORT_SHA}"
+          RELEASE_SHA="${{ needs.ci-build-once.outputs.release_sha }}"
+          IMAGE_TAG="${{ needs.ci-build-once.outputs.image_tag }}"
+          S3_ASSET_VERSION="${{ needs.ci-build-once.outputs.s3_asset_version }}"
+
+          if [ "$IMAGE_TAG" != "$S3_ASSET_VERSION" ] || [ "$IMAGE_TAG" != "$RELEASE_SHA" ]; then
+            echo "::error::Release variable mismatch: RELEASE_SHA=$RELEASE_SHA IMAGE_TAG=$IMAGE_TAG S3_ASSET_VERSION=$S3_ASSET_VERSION"
+            exit 1
+          fi
 
           {
             echo "tags<<EOF"
-            echo "${REGISTRY}/fe-test:${TAG}"
+            echo "${REGISTRY}/fe-test:${IMAGE_TAG}"
             echo "${REGISTRY}/fe-test:latest"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-          echo "image-tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Docker context from single build artifact
         run: |
@@ -171,8 +213,8 @@ jobs:
           cache-to: type=gha,mode=max,scope=frontend
 
   deploy-dev-via-ssm:
-    needs: build-and-push-image-from-same-artifact
-    if: ${{ needs.build-and-push-image-from-same-artifact.result == 'success' }}
+    needs: [ci-build-once, build-and-push-image-from-same-artifact]
+    if: ${{ needs.ci-build-once.result == 'success' && needs.build-and-push-image-from-same-artifact.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -204,7 +246,15 @@ jobs:
 
       - name: Deploy to Dev via SSM
         run: |
-          TAG="${{ needs.build-and-push-image-from-same-artifact.outputs.image-tag }}"
+          RELEASE_SHA="${{ needs.ci-build-once.outputs.release_sha }}"
+          IMAGE_TAG="${{ needs.ci-build-once.outputs.image_tag }}"
+          S3_ASSET_VERSION="${{ needs.ci-build-once.outputs.s3_asset_version }}"
+          TAG="${{ needs.build-and-push-image-from-same-artifact.outputs.image_tag }}"
+
+          if [ "$IMAGE_TAG" != "$S3_ASSET_VERSION" ] || [ "$IMAGE_TAG" != "$RELEASE_SHA" ] || [ "$IMAGE_TAG" != "$TAG" ]; then
+            echo "::error::Release variable mismatch: RELEASE_SHA=$RELEASE_SHA IMAGE_TAG=$IMAGE_TAG S3_ASSET_VERSION=$S3_ASSET_VERSION DEPLOY_TAG=$TAG"
+            exit 1
+          fi
 
           COMMANDS=$(jq -n --arg registry "${{ secrets.ECR_REPOSITORY }}" --arg tag "$TAG" '[
             "set -e",
